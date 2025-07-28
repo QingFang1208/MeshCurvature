@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OBJ Viewer (Arcball + Wireframe Module)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background: #f3f4f6;
+      color: #374151;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+      overflow: hidden;
+    }
+    #container {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      user-select: none;
+    }
+    #ui {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(255,255,255,0.95);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(0,0,0,0.1);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      padding: 12px 18px;
+      border-radius: 8px;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      font-size: 14px;
+      pointer-events: auto;
+      color: #374151;
+    }
+    #fileInput {
+      color: #374151;
+      background: #f9fafb;
+      border: 1px solid #d1d5db;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      transition: all 0.2s ease;
+    }
+    #fileInput:hover {
+      background: #f3f4f6;
+      border-color: #9ca3af;
+    }
+    #errorMsg {
+      color: #dc2626;
+      margin-left: 12px;
+      font-size: 13px;
+      display: none;
+      white-space: pre;
+    }
+    #dropOverlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(59, 130, 246, 0.1);
+      backdrop-filter: blur(4px);
+      color: #1f2937;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.8em;
+      font-weight: 500;
+      letter-spacing: 1px;
+      z-index: 99;
+      pointer-events: none;
+      user-select: none;
+    }
+    canvas {
+      width: 100vw !important;
+      height: 100vh !important;
+      display: block;
+      background: #f3f4f6;
+      touch-action: none;
+      cursor: grab;
+    }
+    canvas:active {
+      cursor: grabbing;
+    }
+    label[for="wireframeToggle"] {
+      user-select: none;
+      font-size: 14px;
+      cursor: pointer;
+      padding-left: 3px;
+    }
+    #wireframeToggle {
+      accent-color: #3b82f6;
+      transform: scale(1.1);
+      margin-left: 6px;
+      cursor: pointer;
+    }
+    @media (max-width: 600px) {
+      #ui { font-size: 13px; padding: 7px 7px; }
+      #fileInput { font-size: 12px; }
+      #dropOverlay { font-size: 1.2em; }
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="ui">
+      <label for="fileInput">OBJ File:</label>
+      <input type="file" id="fileInput" accept=".obj" />
+      <label for="wireframeToggle">
+        <input type="checkbox" id="wireframeToggle" checked />
+        <span>Wireframe</span>
+      </label>
+      <span id="errorMsg"></span>
+    </div>
+    <div id="dropOverlay">Drop OBJ file here</div>
+  </div>
+
+  <!-- regl -->
+  <script src="regl.min.js"></script>
+  <!-- webgl-obj-loader -->
+  <script src="objloader.js"></script>
+  <script>
+    // --- Utility: Minimal vec3/quat functions for arcball ---
+    function vec3(x,y,z){return [x,y,z]}
+    function vec3len(a){return Math.hypot(a[0],a[1],a[2])}
+    function vec3dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]}
+    function vec3cross(a,b){return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]}
+    function vec3norm(a){let l=vec3len(a);return l? [a[0]/l,a[1]/l,a[2]/l]:[0,0,0]}
+    function quatmul(a,b){ // a*b
+      return [
+        a[0]*b[3]+a[3]*b[0]+a[1]*b[2]-a[2]*b[1],
+        a[1]*b[3]+a[3]*b[1]+a[2]*b[0]-a[0]*b[2],
+        a[2]*b[3]+a[3]*b[2]+a[0]*b[1]-a[1]*b[0],
+        a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2]
+      ];
+    }
+    function quatfromaxisangle(axis, angle){
+      let s = Math.sin(angle/2);
+      return [axis[0]*s, axis[1]*s, axis[2]*s, Math.cos(angle/2)];
+    }
+    function quatnormalize(q){
+      let l = Math.hypot(q[0],q[1],q[2],q[3]);
+      return l? [q[0]/l,q[1]/l,q[2]/l,q[3]/l]:[0,0,0,1];
+    }
+    function quatmat4(q){
+      // Converts quaternion to 4x4 rotation matrix (column major)
+      let [x,y,z,w]=q;
+      return [
+        1-2*y*y-2*z*z, 2*x*y+2*w*z,   2*x*z-2*w*y,   0,
+        2*x*y-2*w*z,   1-2*x*x-2*z*z, 2*y*z+2*w*x,   0,
+        2*x*z+2*w*y,   2*y*z-2*w*x,   1-2*x*x-2*y*y, 0,
+        0,             0,             0,             1
+      ];
+    }
+    function mat4mul(a,b){
+      let o=new Array(16);
+      for(let i=0;i<4;++i)for(let j=0;j<4;++j)
+        o[i*4+j]=a[i*4+0]*b[0*4+j]+a[i*4+1]*b[1*4+j]+a[i*4+2]*b[2*4+j]+a[i*4+3]*b[3*4+j];
+      return o;
+    }
+    // --- End utility ---
+
+    const container = document.getElementById('container');
+    const fileInput = document.getElementById('fileInput');
+    const errorMsg = document.getElementById('errorMsg');
+    const dropOverlay = document.getElementById('dropOverlay');
+    const wireframeToggle = document.getElementById('wireframeToggle');
+
+    // Canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    container.appendChild(canvas);
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    // regl
+    const regl = createREGL({canvas: canvas});
+
+    // Wireframe state
+    let wireframeMode = true;
+
+    // Arcball state
+    let arcball = {
+      quat: [0,0,0,1], // current rotation as quaternion
+      lastQuat: [0,0,0,1], // quaternion at drag start
+      dragging: false,
+      lastPos: [0,0,0],
+      pan: [0,0], // [x, y] pan
+      lastPan: [0,0],
+      dist: 3.5,
+      minDist: 0.7, maxDist: 15
+    };
+
+    let meshBuffers = null;
+    let drawMesh = null;
+    let drawWireframe = null;
+    let meshLoaded = false;
+    let meshBBox = null;
+    let meshInfo = { faces: 0, verts: 0 };
+
+    // Wireframe toggle functionality
+    wireframeToggle.addEventListener('click', function() {
+      wireframeMode = !wireframeMode;
+      wireframeToggle.classList.toggle('active', wireframeMode);
+      wireframeToggle.textContent = wireframeMode ? 'Solid' : 'Wireframe';
+    });
+
+    // Function to generate edge indices from triangle faces
+    function generateEdgeIndices(faceIndices) {
+      const edges = new Set();
+      const edgeIndices = [];
+      
+      for (let i = 0; i < faceIndices.length; i += 3) {
+        const a = faceIndices[i];
+        const b = faceIndices[i + 1];
+        const c = faceIndices[i + 2];
+        
+        // Add edges (ensure consistent ordering by using min,max)
+        const edges_to_add = [
+          [Math.min(a, b), Math.max(a, b)],
+          [Math.min(b, c), Math.max(b, c)],
+          [Math.min(c, a), Math.max(c, a)]
+        ];
+        
+        edges_to_add.forEach(edge => {
+          const edgeKey = `${edge[0]},${edge[1]}`;
+          if (!edges.has(edgeKey)) {
+            edges.add(edgeKey);
+            edgeIndices.push(edge[0], edge[1]);
+          }
+        });
+      }
+      
+      return edgeIndices;
+    }
+
+    function getProjectionMatrix(aspect, fov, near, far) {
+      const out = new Float32Array(16);
+      const f = 1.0 / Math.tan(fov / 2);
+      out[0] = f / aspect;
+      out[5] = f;
+      out[10] = (far + near) / (near - far);
+      out[11] = -1;
+      out[14] = (2 * far * near) / (near - far);
+      out[15] = 0;
+      return out;
+    }
+
+    function computeBBox(vertices) {
+      if (!vertices || vertices.length < 3) return null;
+      let min = [vertices[0], vertices[1], vertices[2]];
+      let max = [vertices[0], vertices[1], vertices[2]];
+      for (let i = 3; i < vertices.length; i += 3) {
+        for (let j = 0; j < 3; ++j) {
+          if (vertices[i + j] < min[j]) min[j] = vertices[i + j];
+          if (vertices[i + j] > max[j]) max[j] = vertices[i + j];
+        }
+      }
+      return {min, max};
+    }
+
+    function getFitTransform(bbox) {
+      if (!bbox) return [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+      const center = [
+        (bbox.min[0] + bbox.max[0]) / 2,
+        (bbox.min[1] + bbox.max[1]) / 2,
+        (bbox.min[2] + bbox.max[2]) / 2
+      ];
+      const size = [
+        bbox.max[0] - bbox.min[0],
+        bbox.max[1] - bbox.min[1],
+        bbox.max[2] - bbox.min[2]
+      ];
+      const maxSize = Math.max(size[0], size[1], size[2]);
+      const scale = maxSize > 0 ? 1.6 / maxSize : 1;
+      return [
+        scale, 0, 0, 0,
+        0, scale, 0, 0,
+        0, 0, scale, 0,
+        -scale * center[0], -scale * center[1], -scale * center[2], 1
+      ];
+    }
+
+    function loadObjData(objText, name) {
+      try {
+        const mesh = ObjLoader(objText);
+
+        if (!mesh.vertices || mesh.vertices.length === 0)
+          throw "No vertices found.";
+        if (!mesh.indices || mesh.indices.length === 0)
+          throw "No faces found.";
+        if (!mesh.vertexNormals || mesh.vertexNormals.length === 0) {
+          throw "No vertexnormals found or calculated.";
+        }
+        meshBBox = computeBBox(mesh.vertices);
+
+        // Generate edge indices for wireframe
+        const edgeIndices = generateEdgeIndices(mesh.indices);
+
+        meshBuffers = {
+          positions: regl.buffer(mesh.vertices),
+          normals: regl.buffer(mesh.vertexNormals),
+          colors: regl.buffer(mesh.vertexColors),
+          elements: regl.elements(mesh.indices),
+          wireframeElements: regl.elements(edgeIndices)
+        };
+
+        drawMesh = regl({
+          attributes: {
+            position: meshBuffers.positions,
+            normal: meshBuffers.normals,
+            color: meshBuffers.colors
+          },
+          elements: meshBuffers.elements,
+          uniforms: {
+            model: (_, props) => props.model,
+            view: (_, props) => props.view,
+            projection: (_, props) => props.projection,
+            viewPos: (_, props) => props.viewPos,
+            light1Dir: [1.0, 1.0, 0.0],      // Front-top
+            light2Dir: [0.707, 1.0, 0.707],  // Front-right-top
+            light3Dir: [0.0, 1.0, 1.0],      // Right-top
+            light4Dir: [-0.707, 1.0, 0.707], // Back-right-top
+            light5Dir: [-1.0, 1.0, 0.0],     // Back-top
+            light6Dir: [-0.707, 1.0, -0.707],// Back-left-top
+            light7Dir: [0.0, 1.0, -1.0],     // Left-top
+            light8Dir: [0.707, 1.0, -0.707]  // Front-left-top
+          },
+          vert: `
+            precision mediump float;
+            attribute vec3 position, normal, color;
+            uniform mat4 model, view, projection;
+            varying vec3 vNormal, vPosition, vWorldPos, vColor;
+            void main() {
+              vec4 worldPos = model * vec4(position, 1.0);
+              vWorldPos = worldPos.xyz;
+              vNormal = normalize(mat3(model) * normal);
+              vPosition = (view * worldPos).xyz;
+              vColor = color;
+              gl_Position = projection * view * worldPos;
+            }
+          `,
+          frag: `
+            precision mediump float;
+            varying vec3 vNormal, vPosition, vWorldPos, vColor;
+            uniform vec3 viewPos;
+            uniform vec3 light1Dir, light2Dir, light3Dir, light4Dir;
+            uniform vec3 light5Dir, light6Dir, light7Dir, light8Dir;
+            
+            void main() {
+                vec3 normal = normalize(vNormal);
+                vec3 viewDir = normalize(viewPos - vWorldPos);
+                
+                vec3 ambient = vColor * 0.7;
+                
+                // Calculate diffuse lighting from all 8 directional lights
+                vec3 totalDiffuse = vec3(0.0);
+                
+                // Light 1 (Front-top)
+                vec3 lightDir1 = normalize(light1Dir);
+                float NdotL1 = max(dot(normal, lightDir1), 0.0);
+                totalDiffuse += vColor * NdotL1 * 0.2;
+                
+                // Light 2 (Front-right-top)
+                vec3 lightDir2 = normalize(light2Dir);
+                float NdotL2 = max(dot(normal, lightDir2), 0.0);
+                totalDiffuse += vColor * NdotL2 * 0.2;
+                
+                // Light 3 (Right-top)
+                vec3 lightDir3 = normalize(light3Dir);
+                float NdotL3 = max(dot(normal, lightDir3), 0.0);
+                totalDiffuse += vColor * NdotL3 * 0.2;
+                
+                // Light 4 (Back-right-top)
+                vec3 lightDir4 = normalize(light4Dir);
+                float NdotL4 = max(dot(normal, lightDir4), 0.0);
+                totalDiffuse += vColor * NdotL4 * 0.2;
+                
+                // Light 5 (Back-top)
+                vec3 lightDir5 = normalize(light5Dir);
+                float NdotL5 = max(dot(normal, lightDir5), 0.0);
+                totalDiffuse += vColor * NdotL5 * 0.2;
+                
+                // Light 6 (Back-left-top)
+                vec3 lightDir6 = normalize(light6Dir);
+                float NdotL6 = max(dot(normal, lightDir6), 0.0);
+                totalDiffuse += vColor * NdotL6 * 0.2;
+                
+                // Light 7 (Left-top)
+                vec3 lightDir7 = normalize(light7Dir);
+                float NdotL7 = max(dot(normal, lightDir7), 0.0);
+                totalDiffuse += vColor * NdotL7 * 0.2;
+                
+                // Light 8 (Front-left-top)
+                vec3 lightDir8 = normalize(light8Dir);
+                float NdotL8 = max(dot(normal, lightDir8), 0.0);
+                totalDiffuse += vColor * NdotL8 * 0.2;
+                
+                // Minimal rim lighting
+                float rim = 1.0 - max(dot(viewDir, normal), 0.0);
+                rim = smoothstep(0.6, 1.0, rim);
+                vec3 rimColor = vec3(0.2, 0.3, 0.5) * rim * 0.1;
+                
+                // Subtle specular highlight
+                vec3 halfDir = normalize(lightDir1 + viewDir);
+                float spec = pow(max(dot(normal, halfDir), 0.0), 32.0);
+                vec3 specular = vec3(0.2) * spec * NdotL1 * 0.2;
+                
+                vec3 finalColor = ambient + totalDiffuse + rimColor + specular;
+              
+              // Tone mapping and gamma correction
+              finalColor = finalColor / (finalColor + vec3(1.0));
+              finalColor = pow(finalColor, vec3(1.0/2.2));
+              
+              gl_FragColor = vec4(finalColor, 1.0);
+            }
+          `
+        });
+
+        // Wireframe renderer
+        drawWireframe = regl({
+          attributes: {
+            position: meshBuffers.positions
+          },
+          elements: meshBuffers.wireframeElements,
+          primitive: 'lines',
+          uniforms: {
+            model: (_, props) => props.model,
+            view: (_, props) => props.view,
+            projection: (_, props) => props.projection,
+            wireColor: [0.0, 0.0, 0.0]
+          },
+          vert: `
+            precision mediump float;
+            attribute vec3 position;
+            uniform mat4 model, view, projection;
+            void main() {
+              gl_Position = projection * view * model * vec4(position, 1.0);
+              // Apply depth shift to prevent z-fighting with surface
+              gl_Position.z -= 0.0001 * gl_Position.w;
+            }
+          `,
+          frag: `
+            precision mediump float;
+            uniform vec3 wireColor;
+            void main() {
+              gl_FragColor = vec4(wireColor, 0.8);
+            }
+          `,
+          blend: {
+            enable: true,
+            func: {
+              srcRGB: 'src alpha',
+              srcAlpha: 1,
+              dstRGB: 'one minus src alpha',
+              dstAlpha: 1
+            },
+            equation: {
+              rgb: 'add',
+              alpha: 'add'
+            }
+          },
+          lineWidth: 0.5
+        });
+
+        meshLoaded = true;
+        meshInfo.faces = mesh.indices.length/3|0;
+        meshInfo.verts = mesh.vertices.length/3|0;
+        if (name) {
+          fileInput.title = name;
+        }
+        errorMsg.style.display = "none";
+      } catch (e) {
+        meshLoaded = false;
+        drawMesh = null;
+        drawWireframe = null;
+        errorMsg.textContent = "Error: " + (e.message || e);
+        errorMsg.style.display = "inline";
+      }
+    }
+
+    // Default mesh: a cube
+    const defaultCube = `
+o Cube
+v -1 -1 -1
+v  1 -1 -1 
+v  1  1 -1 
+v -1  1 -1 
+v -1 -1  1 
+v  1 -1  1 
+v  1  1  1 
+v -1  1  1 
+vn 0 0 -1
+vn 0 0 1
+vn 0 -1 0
+vn 0 1 0
+vn -1 0 0
+vn 1 0 0
+f 1//1 2//1 3//1 4//1
+f 5//2 8//2 7//2 6//2
+f 1//3 5//3 6//3 2//3
+f 2//6 6//6 7//6 3//6
+f 3//4 7//4 8//4 4//4
+f 5//5 1//5 4//5 8//5
+`;
+
+    loadObjData(defaultCube);
+
+    // File input
+    fileInput.addEventListener('change', function (e) {
+      const file = fileInput.files[0];
+      if (!file) return;
+      if (!file.name.match(/\.obj$/i)) {
+        errorMsg.textContent = "Please select an .obj file.";
+        errorMsg.style.display = "inline";
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = function (evt) {
+        loadObjData(evt.target.result, file.name);
+      };
+      reader.onerror = function () {
+        errorMsg.textContent = "Failed to read file.";
+        errorMsg.style.display = "inline";
+      };
+      reader.readAsText(file);
+    });
+
+    // Drag-and-drop support
+    function showDropOverlay(show) {
+      dropOverlay.style.display = show ? "flex" : "none";
+    }
+    ['dragenter','dragover'].forEach(evt =>
+      document.addEventListener(evt, e => {
+        e.preventDefault();
+        if (e.dataTransfer && Array.from(e.dataTransfer.items).some(it => it.kind==="file")) {
+          showDropOverlay(true);
+        }
+      }, false)
+    );
+    ['dragleave','drop'].forEach(evt =>
+      document.addEventListener(evt, e => {
+        e.preventDefault();
+        showDropOverlay(false);
+      }, false)
+    );
+    document.addEventListener('drop', function(e) {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        const file = e.dataTransfer.files[0];
+        if (!file.name.match(/\.obj$/i)) {
+          errorMsg.textContent = "Please drop an .obj file.";
+          errorMsg.style.display = "inline";
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = function(evt) {
+          loadObjData(evt.target.result, file.name);
+        };
+        reader.onerror = function() {
+          errorMsg.textContent = "Failed to read file.";
+          errorMsg.style.display = "inline";
+        };
+        reader.readAsText(file);
+      }
+      showDropOverlay(false);
+    }, false);
+
+    // Arcball mapping: from screen (x,y) to sphere vec3
+    function arcballVec(x, y, w, h) {
+      let nx = (2*x-w)/Math.min(w,h);
+      let ny = (h-2*y)/Math.min(w,h);
+      let r2 = nx*nx + ny*ny;
+      let z = r2 > 1 ? 0 : Math.sqrt(1 - r2);
+      let v = [nx, ny, z];
+      let len = vec3len(v);
+      return len ? [v[0]/len, v[1]/len, v[2]/len] : [0,0,1];
+    }
+
+    // Mouse controls: arcball rotation, right-drag/shift-drag to pan
+    canvas.addEventListener('mousedown', e => {
+      if (e.button === 0 && !e.shiftKey) {
+        arcball.dragging = 'arcball';
+        arcball.lastPos = arcballVec(e.clientX, e.clientY, canvas.width, canvas.height);
+        arcball.lastQuat = arcball.quat.slice();
+        document.body.style.cursor = "grabbing";
+      } else if (e.button === 2 || (e.button === 0 && e.shiftKey)) {
+        arcball.dragging = 'pan';
+        arcball.lastX = e.clientX;
+        arcball.lastY = e.clientY;
+        arcball.lastPan = arcball.pan.slice();
+        document.body.style.cursor = "move";
+      }
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => {
+      if (!arcball.dragging) return;
+      if (arcball.dragging === 'arcball') {
+        let v0 = arcball.lastPos;
+        let v1 = arcballVec(e.clientX, e.clientY, canvas.width, canvas.height);
+        let axis = vec3cross(v0, v1);
+        let angle = Math.acos(Math.min(1,vec3dot(v0,v1)));
+        if (vec3len(axis) > 1e-6 && angle > 1e-4) {
+          let dq = quatfromaxisangle(vec3norm(axis), angle);
+          arcball.quat = quatnormalize(quatmul(dq, arcball.lastQuat));
+        }
+      } else if (arcball.dragging === 'pan') {
+        let dx = (e.clientX - arcball.lastX) / canvas.width;
+        let dy = (e.clientY - arcball.lastY) / canvas.height;
+        let scale = arcball.dist * 2.4;
+        arcball.pan[0] = arcball.lastPan[0] + dx * scale;
+        arcball.pan[1] = arcball.lastPan[1] - dy * scale;
+      }
+      e.preventDefault();
+    });
+    window.addEventListener('mouseup', e => {
+      arcball.dragging = false;
+      document.body.style.cursor = "";
+    });
+
+    // Mouse wheel zoom
+    canvas.addEventListener('wheel', e => {
+      let delta = e.deltaY || e.wheelDelta;
+      arcball.dist *= (1 + Math.sign(delta) * 0.08);
+      arcball.dist = Math.max(arcball.minDist, Math.min(arcball.dist, arcball.maxDist));
+      e.preventDefault();
+    }, { passive: false });
+
+    // Touch controls: 1-finger arcball, 2-finger pan+zoom
+    let touchState = null;
+    canvas.addEventListener('touchstart', function(e) {
+      if (e.touches.length === 1) {
+        touchState = {
+          mode: 'arcball',
+          pos: [e.touches[0].clientX, e.touches[0].clientY],
+          lastPos: arcballVec(e.touches[0].clientX, e.touches[0].clientY, canvas.width, canvas.height),
+          lastQuat: arcball.quat.slice(),
+          lastPan: arcball.pan.slice()
+        };
+      } else if (e.touches.length === 2) {
+        let dx = e.touches[0].clientX - e.touches[1].clientX;
+        let dy = e.touches[0].clientY - e.touches[1].clientY;
+        let dist = Math.sqrt(dx*dx + dy*dy);
+        let mx = (e.touches[0].clientX + e.touches[1].clientX)/2;
+        let my = (e.touches[0].clientY + e.touches[1].clientY)/2;
+        touchState = {
+          mode: 'panzoom',
+          startDist: dist,
+          startPan: arcball.pan.slice(),
+          startZoom: arcball.dist,
+          lastMx: mx, lastMy: my
+        };
+      }
+      e.preventDefault();
+    }, {passive: false});
+    canvas.addEventListener('touchmove', function(e) {
+      if (!touchState) return;
+      if (touchState.mode === 'arcball' && e.touches.length === 1) {
+        let v0 = touchState.lastPos;
+        let v1 = arcballVec(e.touches[0].clientX, e.touches[0].clientY, canvas.width, canvas.height);
+        let axis = vec3cross(v0, v1);
+        let angle = Math.acos(Math.min(1,vec3dot(v0,v1)));
+        if (vec3len(axis) > 1e-6 && angle > 1e-4) {
+          let dq = quatfromaxisangle(vec3norm(axis), angle);
+          arcball.quat = quatnormalize(quatmul(dq, touchState.lastQuat));
+        }
+      } else if (touchState.mode === 'panzoom' && e.touches.length === 2) {
+        let dx = e.touches[0].clientX - e.touches[1].clientX;
+        let dy = e.touches[0].clientY - e.touches[1].clientY;
+        let dist = Math.sqrt(dx*dx + dy*dy);
+        let mx = (e.touches[0].clientX + e.touches[1].clientX)/2;
+        let my = (e.touches[0].clientY + e.touches[1].clientY)/2;
+        // Pan
+        let dxm = (mx - touchState.lastMx) / canvas.width;
+        let dym = (my - touchState.lastMy) / canvas.height;
+        let panScale = arcball.dist * 2.4;
+        arcball.pan[0] = touchState.startPan[0] + dxm * panScale;
+        arcball.pan[1] = touchState.startPan[1] - dym * panScale;
+        // Zoom
+        let scale = touchState.startZoom * touchState.startDist / dist;
+        arcball.dist = Math.max(arcball.minDist, Math.min(scale, arcball.maxDist));
+      }
+      e.preventDefault();
+    }, {passive: false});
+    canvas.addEventListener('touchend', function(e) {
+      if (e.touches.length === 0) touchState = null;
+    });
+
+    // Matrix helpers
+    function lookAt(eye, center, up) {
+      let zx = eye[0] - center[0], zy = eye[1] - center[1], zz = eye[2] - center[2];
+      let zlen = Math.hypot(zx, zy, zz);
+      zx /= zlen; zy /= zlen; zz /= zlen;
+      let xx = up[1]*zz - up[2]*zy,
+          xy = up[2]*zx - up[0]*zz,
+          xz = up[0]*zy - up[1]*zx;
+      let xlen = Math.hypot(xx, xy, xz);
+      xx /= xlen; xy /= xlen; xz /= xlen;
+      let yx = zy*xz - zz*xy,
+          yy = zz*xx - zx*xz,
+          yz = zx*xy - zy*xx;
+      return [
+        xx, yx, zx, 0,
+        xy, yy, zy, 0,
+        xz, yz, zz, 0,
+        -(xx*eye[0]+xy*eye[1]+xz*eye[2]),
+        -(yx*eye[0]+yy*eye[1]+yz*eye[2]),
+        -(zx*eye[0]+zy*eye[1]+zz*eye[2]),
+        1
+      ];
+    }
+
+    // Animation loop
+    regl.frame(({viewportWidth, viewportHeight}) => {
+      regl.clear({color: [0.95, 0.96, 0.98, 1], depth: 1});
+      if (!meshLoaded || (!drawMesh && !drawWireframe)) return;
+
+      const aspect = viewportWidth / viewportHeight;
+      const projection = getProjectionMatrix(aspect, Math.PI/3, 0.08, 100);
+
+      // Camera is always at [0,0,dist] and looks at [0,0,0]
+      let eye = [0,0,arcball.dist];
+      let up = [0,1,0];
+      // Apply pan in camera space
+      eye[0] -= arcball.pan[0];
+      eye[1] -= arcball.pan[1];
+      let center = [-arcball.pan[0], -arcball.pan[1], 0];
+
+      // Transform eye position by arcball rotation for proper view-dependent lighting
+      const rotMat = quatmat4(arcball.quat);
+      const invRotMat = [
+        rotMat[0], rotMat[4], rotMat[8], 0,
+        rotMat[1], rotMat[5], rotMat[9], 0,
+        rotMat[2], rotMat[6], rotMat[10], 0,
+        0, 0, 0, 1
+      ];
+      const rotatedEye = [
+        invRotMat[0]*eye[0] + invRotMat[1]*eye[1] + invRotMat[2]*eye[2],
+        invRotMat[4]*eye[0] + invRotMat[5]*eye[1] + invRotMat[6]*eye[2],
+        invRotMat[8]*eye[0] + invRotMat[9]*eye[1] + invRotMat[10]*eye[2]
+      ];
+
+      const view = lookAt(eye, center, up);
+      const fit = getFitTransform(meshBBox);
+      const rot = quatmat4(arcball.quat);
+      const model = mat4mul(fit, rot);
+
+      const props = { 
+        model, 
+        view, 
+        projection, 
+        viewPos: rotatedEye 
+      };
+
+      // Render based on mode
+      drawMesh(props);
+      if (wireframeMode && drawWireframe) {
+        drawWireframe(props);
+      }
+    });
+
+    // Show faces/verts in tooltip
+    fileInput.addEventListener('mouseover', () => {
+      if (meshLoaded)
+        fileInput.title = 'Vertices: ' + meshInfo.verts + '\nFaces: ' + meshInfo.faces;
+    });
+  </script>
+</body>
+</html>
