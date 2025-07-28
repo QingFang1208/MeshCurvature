@@ -120,6 +120,9 @@ void cal_mean_curvature(PolyMesh* const mesh,
 
   for (MVert* vh : mesh->vertices()) {
     // Calculate vertex mean curvature
+    // ...
+
+    // ...
   }
   std::cout << "Calculate Mean Curvature Done" << std::endl;
 }
@@ -132,6 +135,9 @@ void cal_gaussian_curvature(PolyMesh* const mesh,
 
   for (MVert* vh : mesh->vertices()) {
     // Calculate vertex Gaussian curvature
+    // ...
+
+    // ...
   }
   std::cout << "Calculate Gaussian Curvature Done" << std::endl;
 }
