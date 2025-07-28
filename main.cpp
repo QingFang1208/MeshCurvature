@@ -1,4 +1,5 @@
 #include <fstream>
+#include <algorithm>
 
 #include "Math/Mrgb.h"
 #include "PolyMesh/IOManager.h"
