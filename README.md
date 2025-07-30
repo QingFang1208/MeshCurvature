@@ -6,7 +6,7 @@
 git clone https://github.com/QingFang1208/MeshCurvature
 cd MeshCurvature
 mkdir build && cd build
-cmake -A x64 ..
+cmake ..
 ```
 
 Open **MeshCurvature.sln**, select **ALL_BUILD** as launch project, and run.
